@@ -83,4 +83,9 @@ if __name__ == "__main__":
 >>     -Headers @{ "Content-Type" = "application/json" } `
 >>     -Body '{"name": "item1", "description": "This is item1"}'
 
+Invoke-WebRequest -Uri "https://f663-14-97-189-166.ngrok-free.app/api/items/" `
+>>     -Method POST `
+>>     -Headers @{ "Content-Type" = "application/json" } `
+>>     -Body '{"name": "item1", "description": "This is item1"}'
+
 '''
