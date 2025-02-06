@@ -29,20 +29,22 @@ async def get_policyholder(db: AsyncSession, policyholder_id: int):
     result = await db.execute(select(Policyholder).where(Policyholder.id == policyholder_id))
     return result.scalar_one_or_none()
 
-async def create_policyholder(db: AsyncSession, name: str, email: str):
+async def create_policyholder(db: AsyncSession, name: str, email: str, password: str):
     validate_email(email)
     new_id = await generate_policyholder_id(db)
     policyholder = Policyholder(id=new_id, name=name, email=email)
+    policyholder.set_password(password)
     db.add(policyholder)
     await db.commit()
     await db.refresh(policyholder)
     return policyholder
 
-async def create_policy(db: AsyncSession, policyholder_id: int, coverage: float, status: str):
+
+
+async def create_policy(db: AsyncSession, policyholder_id: int, coverage: float):
     validate_coverage(coverage)
-    max_policy_id = await db.execute(select(func.max(Policy.policy_id)).where(Policy.policyholder_id == policyholder_id))
-    new_policy_id = (max_policy_id.scalar() or 0) + 1
-    policy = Policy(policyholder_id=policyholder_id, policy_id=new_policy_id, coverage=coverage, status=status)
+    new_id = await generate_policyholder_id(db)
+    policy = Policy(policyholder_id=policyholder_id, policy_id=new_id, coverage=coverage, status="active")
     db.add(policy)
     await db.commit()
     await db.refresh(policy)
@@ -60,10 +62,9 @@ async def create_claim(db: AsyncSession, policyholder_id: int, policy_id: int, a
         raise HTTPException(status_code=404, detail="Policy not found")
     if total + amount > policy.coverage:
         raise HTTPException(status_code=400, detail="Claim exceeds available coverage")
-    max_claim_id = await db.execute(select(func.max(Claim.claim_id)).where(Claim.policyholder_id == policyholder_id, Claim.policy_id == policy_id))
-    new_claim_id = (max_claim_id.scalar() or 0) + 1
+    new_id = await generate_policyholder_id(db)
     status = "flagged" if amount > 10000 else "pending"
-    claim = Claim(policyholder_id=policyholder_id, policy_id=policy_id, claim_id=new_claim_id, amount=amount, status=status)
+    claim = Claim(policyholder_id=policyholder_id, policy_id=policy_id, claim_id=new_id, amount=amount, status=status)
     db.add(claim)
     await db.commit()
     await db.refresh(claim)
@@ -133,11 +134,111 @@ async def delete_policy(db: AsyncSession, policyholder_id: int, policy_id: int):
     await db.commit()
     return {"message": f"Policy {policy_id} and related claims deleted successfully"}
 
-async def update_policyholder(db: AsyncSession, policyholder_id: int, name: str, email: str):
+async def update_policyholder(db: AsyncSession, policyholder_id: int, name: str, email: str, password: str):
     policyholder = await db.get(Policyholder, policyholder_id)
     if not policyholder:
         raise HTTPException(status_code=404, detail="Policyholder not found")
     policyholder.name = name
     policyholder.email = email
+    policyholder.set_password(password)
     await db.commit()
     return policyholder
+
+
+
+async def get_all_policyholders(db: AsyncSession):
+    result = await db.execute(
+        select(Policyholder.id, Policyholder.name, Policyholder.email)
+    )
+
+    data = result.fetchall()  # Fetch all the results
+
+    if not data:
+        raise HTTPException(status_code=404, detail="No policyholders found")
+
+    # Returning only policyholder data as a list of dictionaries
+    return [
+        {
+            "policyholder_id": row[0],
+            "name": row[1],
+            "email": row[2]
+        }
+        for row in data
+    ]
+
+
+async def check_admin_status(db: AsyncSession, policyholder_id: int) -> bool:
+    result = await db.execute(select(Policyholder).filter(Policyholder.id == policyholder_id))
+    policyholder = result.scalars().first()  
+    if policyholder:
+        return policyholder.is_admin
+    return False
+
+async def login(db: AsyncSession, policyholder_id: int, password: str):
+    result = await db.execute(select(Policyholder).filter(Policyholder.id == policyholder_id))
+    policyholder = result.scalars().first()
+    if policyholder and policyholder.check_password(password):
+        return 123 if policyholder.is_admin else 321
+    return False
+ 
+
+
+
+# Function to get policies
+async def get_policies_by_policyholder(db: AsyncSession, policyholder_id: int):
+        result = await db.execute(
+            select(
+                Policy.policy_id,
+                Policy.coverage,
+                Policy.status.label("policy_status")
+            )
+            .filter(Policy.policyholder_id == policyholder_id)
+        )
+        policies = result.fetchall()
+
+        if not policies:
+            raise HTTPException(status_code=404, detail="No policies found for this policyholder")
+
+        # Convert to list of dictionaries for JSON serializability
+        policies_dict = [{"policy_id": policy.policy_id, "coverage": policy.coverage, "policy_status": policy.policy_status} for policy in policies]
+
+        return policies_dict
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from fastapi import HTTPException
+
+# Function to get claims by policyholder_id
+async def get_claims_by_policyholder(db: AsyncSession, policyholder_id: int):
+    try:
+        result = await db.execute(
+            select(
+                Claim.claim_id,
+                Claim.amount,
+                Claim.status.label("claim_status"),
+                Claim.policy_id
+            )
+            .join(Policy, Policy.policy_id == Claim.policy_id)  # Joining Policy with Claim
+            .filter(Policy.policyholder_id == policyholder_id)  # Filtering based on policyholder_id
+        )
+
+        # Using scalars() to map rows directly to values
+        claims = result.all()
+
+        if not claims:
+            raise HTTPException(status_code=404, detail="No claims found for this policyholder")
+
+        # Convert the result to a list of dictionaries for JSON serializability
+        claims_dict = [
+            {
+                "claim_id": claim[0], 
+                "amount": claim[1], 
+                "claim_status": claim[2], 
+                "policy_id": claim[3]
+            } 
+            for claim in claims
+        ]
+
+        return claims_dict
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching claims: {str(e)}")
